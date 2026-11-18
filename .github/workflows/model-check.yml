@@ -1,0 +1,41 @@
+name: Modell-URLs prüfen
+
+on:
+  push:
+    paths:
+      - ".github/workflows/model-check.yml"
+      - "app/src/main/java/de/localai/chat/ModelCatalog.kt"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: litert-community auflisten
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          def get(u):
+              return json.load(urllib.request.urlopen(u, timeout=60))
+          models = get("https://huggingface.co/api/models?author=litert-community&limit=200&full=true")
+          for m in models:
+              files = [s["rfilename"] for s in m.get("siblings", []) if s["rfilename"].endswith((".task", ".litertlm"))]
+              if not files:
+                  continue
+              print(f"== {m['id']}  gated={m.get('gated')}")
+              try:
+                  info = get(f"https://huggingface.co/api/models/{m['id']}?blobs=true")
+                  for s in info.get("siblings", []):
+                      if s["rfilename"].endswith(".task"):
+                          print(f"   {s['rfilename']}  {s.get('size', 0)/1e6:.0f} MB")
+              except Exception as e:
+                  print("   ERR", e)
+          PY
+      - name: Katalog-URLs testen
+        if: hashFiles('app/src/main/java/de/localai/chat/ModelCatalog.kt') != ''
+        run: |
+          grep -o 'https://huggingface.co/[^"]*' app/src/main/java/de/localai/chat/ModelCatalog.kt | while read u; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -L -r 0-0 "$u")
+            echo "$code  $u"
+          done
