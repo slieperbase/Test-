@@ -23,6 +23,13 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk LokaleKI.apk
+      - name: APK prüfen (Prozessor-Architekturen, Signatur)
+        run: |
+          echo "Enthaltene native Bibliotheken:"
+          unzip -l LokaleKI.apk | grep '\.so$' | awk '{print $4}' | cut -d/ -f2 | sort | uniq -c
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          $BT/aapt2 dump badging LokaleKI.apk | grep -E "^package|sdkVersion|native-code"
+          $BT/apksigner verify --print-certs LokaleKI.apk | head -3
       - uses: actions/upload-artifact@v4
         with:
           name: LokaleKI-debug-apk

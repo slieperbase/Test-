@@ -16,9 +16,23 @@ android {
         versionName = "1.0"
     }
 
+    // Fester Signaturschlüssel, damit jede neue APK als Update über die alte installiert werden kann
+    signingConfigs {
+        create("shared") {
+            storeFile = file("lokaleki.keystore")
+            storePassword = "lokaleki"
+            keyAlias = "lokaleki"
+            keyPassword = "lokaleki"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("shared")
         }
     }
     compileOptions {
