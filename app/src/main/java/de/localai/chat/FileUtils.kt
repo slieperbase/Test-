@@ -13,8 +13,10 @@ data class Attachment(
 
 object FileUtils {
 
-    /** Max. Zeichen pro Datei – kleine Modelle haben nur ein begrenztes Kontextfenster. */
-    const val MAX_ATTACHMENT_CHARS = 8000
+    fun modelsDir(context: Context): File = File(context.filesDir, "models").apply { mkdirs() }
+
+    /** Max. Zeichen pro Datei, abhängig vom Kontextfenster des Modells (Platz für die Antwort lassen). */
+    fun maxAttachmentChars(maxTokens: Int): Int = (maxTokens * 1.5).toInt().coerceIn(1000, 8000)
 
     fun displayName(context: Context, uri: Uri): String {
         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
@@ -42,9 +44,9 @@ object FileUtils {
      * Liest eine Textdatei (txt, md, csv, json, Quellcode, …) ein.
      * Wirft eine Exception, wenn es sich offensichtlich um eine Binärdatei handelt.
      */
-    fun readTextAttachment(context: Context, uri: Uri): Attachment {
+    fun readTextAttachment(context: Context, uri: Uri, maxChars: Int): Attachment {
         val name = displayName(context, uri)
-        val limitBytes = MAX_ATTACHMENT_CHARS * 4 + 1
+        val limitBytes = maxChars * 4 + 1
         val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
             val buf = ByteArray(limitBytes)
             var total = 0
@@ -64,8 +66,8 @@ object FileUtils {
         }
         var text = bytes.toString(Charsets.UTF_8)
         var truncated = bytes.size >= limitBytes
-        if (text.length > MAX_ATTACHMENT_CHARS) {
-            text = text.substring(0, MAX_ATTACHMENT_CHARS)
+        if (text.length > maxChars) {
+            text = text.substring(0, maxChars)
             truncated = true
         }
         return Attachment(name, text, truncated)
@@ -75,9 +77,7 @@ object FileUtils {
     fun importModel(context: Context, uri: Uri, onProgress: (Float) -> Unit): File {
         val name = displayName(context, uri)
         val total = size(context, uri)
-        val dir = File(context.filesDir, "models").apply { mkdirs() }
-        // Alte Modelle entfernen, um Speicher zu sparen
-        dir.listFiles()?.forEach { it.delete() }
+        val dir = modelsDir(context)
         val target = File(dir, name)
         val tmp = File(dir, "$name.part")
         context.contentResolver.openInputStream(uri)?.use { input ->

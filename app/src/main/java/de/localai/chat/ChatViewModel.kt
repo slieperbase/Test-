@@ -1,10 +1,15 @@
 package de.localai.chat
 
+import android.app.ActivityManager
 import android.app.Application
+import android.content.Context
 import android.net.Uri
+import android.os.StatFs
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 enum class Role { USER, ASSISTANT }
 
@@ -27,15 +33,29 @@ data class ChatMessage(
 
 enum class ModelStatus { NONE, IMPORTING, LOADING, READY, ERROR }
 
+data class DownloadProgress(val downloaded: Long, val total: Long) {
+    val fraction: Float get() = if (total > 0) downloaded.toFloat() / total else 0f
+}
+
+/** Eine auf dem Gerät gespeicherte Modelldatei. */
+data class InstalledModel(val fileName: String, val sizeMb: Int)
+
 data class UiState(
     val modelName: String? = null,
+    val activeFile: String? = null,
     val modelStatus: ModelStatus = ModelStatus.NONE,
     val importProgress: Float = 0f,
     val useGpu: Boolean = false,
+    val contextTokens: Int = 2048,
     val messages: List<ChatMessage> = emptyList(),
     val pendingAttachments: List<Attachment> = emptyList(),
     val isGenerating: Boolean = false,
     val snackbar: String? = null,
+    val installed: List<InstalledModel> = emptyList(),
+    val downloads: Map<String, DownloadProgress> = emptyMap(),
+    val hfToken: String = "",
+    val deviceRamGb: Int = 0,
+    val freeStorageMb: Long = 0,
 )
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
@@ -43,13 +63,107 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("settings", 0)
     private val engine = LlmEngine(app)
     private val ids = AtomicLong(0)
+    private val downloadJobs = mutableMapOf<String, Job>()
 
-    private val _state = MutableStateFlow(UiState(useGpu = prefs.getBoolean(KEY_GPU, false)))
+    private val _state = MutableStateFlow(
+        UiState(
+            useGpu = prefs.getBoolean(KEY_GPU, false),
+            hfToken = prefs.getString(KEY_HF_TOKEN, "") ?: "",
+            deviceRamGb = deviceRamGb(app),
+        )
+    )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    private val modelsDir get() = FileUtils.modelsDir(getApplication())
+
     init {
+        refreshInstalled()
         val path = prefs.getString(KEY_MODEL_PATH, null)
         if (path != null && File(path).exists()) loadModel(path)
+    }
+
+    // ---------- Modellverwaltung ----------
+
+    fun refreshInstalled() {
+        val files = modelsDir.listFiles()
+            ?.filter { it.isFile && !it.name.endsWith(".part") }
+            ?.sortedBy { it.name }
+            ?.map { InstalledModel(it.name, (it.length() / 1_000_000).toInt()) }
+            ?: emptyList()
+        val free = try { StatFs(modelsDir.path).availableBytes / 1_000_000 } catch (_: Exception) { 0L }
+        _state.update { it.copy(installed = files, freeStorageMb = free) }
+    }
+
+    fun setHfToken(token: String) {
+        prefs.edit().putString(KEY_HF_TOKEN, token.trim()).apply()
+        _state.update { it.copy(hfToken = token) }
+    }
+
+    fun downloadModel(model: CatalogModel) {
+        if (downloadJobs.containsKey(model.id)) return
+        val s = _state.value
+        if (model.needsToken && s.hfToken.isBlank()) {
+            _state.update { it.copy(snackbar = "Für ${model.name} bitte zuerst unten deinen Hugging-Face-Token eintragen.") }
+            return
+        }
+        val partSize = File(modelsDir, model.fileName + ".part").let { if (it.exists()) it.length() / 1_000_000 else 0 }
+        if (s.freeStorageMb in 1 until (model.sizeMb - partSize + 200)) {
+            _state.update { it.copy(snackbar = "Nicht genug Speicherplatz: ${model.sizeMb} MB benötigt, ${s.freeStorageMb} MB frei.") }
+            return
+        }
+        _state.update { it.copy(downloads = it.downloads + (model.id to DownloadProgress(0, model.sizeMb * 1_000_000L))) }
+        downloadJobs[model.id] = viewModelScope.launch {
+            try {
+                ModelDownloader.download(
+                    url = model.url,
+                    target = File(modelsDir, model.fileName),
+                    token = if (model.needsToken) _state.value.hfToken else null,
+                ) { done, total ->
+                    _state.update { it.copy(downloads = it.downloads + (model.id to DownloadProgress(done, total))) }
+                }
+                refreshInstalled()
+                _state.update { it.copy(snackbar = "${model.name} ist bereit.") }
+                // Wenn noch kein Modell aktiv ist, das neue direkt verwenden
+                if (_state.value.modelStatus != ModelStatus.READY) useModel(model.fileName)
+            } catch (e: CancellationException) {
+                // vom Nutzer abgebrochen – .part-Datei bleibt zum Fortsetzen liegen
+            } catch (e: Throwable) {
+                _state.update { it.copy(snackbar = "Download fehlgeschlagen: ${e.message ?: e.javaClass.simpleName}") }
+            } finally {
+                downloadJobs.remove(model.id)
+                _state.update { it.copy(downloads = it.downloads - model.id) }
+                refreshInstalled()
+            }
+        }
+    }
+
+    fun cancelDownload(model: CatalogModel) {
+        downloadJobs[model.id]?.cancel()
+    }
+
+    fun hasPartialDownload(model: CatalogModel): Boolean =
+        File(modelsDir, model.fileName + ".part").exists()
+
+    fun useModel(fileName: String) {
+        if (_state.value.isGenerating) return
+        val file = File(modelsDir, fileName)
+        if (!file.exists()) return
+        prefs.edit().putString(KEY_MODEL_PATH, file.absolutePath).apply()
+        loadModel(file.absolutePath)
+    }
+
+    fun deleteModel(fileName: String) {
+        if (_state.value.activeFile == fileName) {
+            if (_state.value.isGenerating) return
+            engine.close()
+            prefs.edit().remove(KEY_MODEL_PATH).apply()
+            _state.update {
+                it.copy(modelStatus = ModelStatus.NONE, activeFile = null, modelName = null, messages = emptyList())
+            }
+        }
+        File(modelsDir, fileName).delete()
+        File(modelsDir, "$fileName.part").delete()
+        refreshInstalled()
     }
 
     fun importModel(uri: Uri) {
@@ -63,8 +177,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         _state.update { it.copy(importProgress = p) }
                     }
                 }
-                prefs.edit().putString(KEY_MODEL_PATH, file.absolutePath).apply()
-                loadModel(file.absolutePath)
+                refreshInstalled()
+                useModel(file.name)
             } catch (e: Exception) {
                 _state.update {
                     it.copy(modelStatus = ModelStatus.ERROR, snackbar = "Import fehlgeschlagen: ${e.message}")
@@ -74,11 +188,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadModel(path: String) {
-        val name = File(path).name
-        _state.update { it.copy(modelStatus = ModelStatus.LOADING, modelName = name) }
+        val fileName = File(path).name
+        val displayName = ModelCatalog.byFileName(fileName)?.name ?: fileName
+        val tokens = ModelCatalog.maxTokensFor(fileName)
+        _state.update {
+            it.copy(
+                modelStatus = ModelStatus.LOADING, modelName = displayName,
+                activeFile = fileName, contextTokens = tokens,
+            )
+        }
         viewModelScope.launch {
             try {
-                engine.load(path, _state.value.useGpu)
+                engine.load(path, _state.value.useGpu, tokens)
                 _state.update { it.copy(modelStatus = ModelStatus.READY, messages = emptyList()) }
             } catch (e: Throwable) {
                 _state.update {
@@ -99,17 +220,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         prefs.getString(KEY_MODEL_PATH, null)?.let { if (File(it).exists()) loadModel(it) }
     }
 
+    // ---------- Chat ----------
+
     fun addAttachment(uri: Uri) {
+        val maxChars = FileUtils.maxAttachmentChars(_state.value.contextTokens)
         viewModelScope.launch {
             try {
                 val att = withContext(Dispatchers.IO) {
-                    FileUtils.readTextAttachment(getApplication(), uri)
+                    FileUtils.readTextAttachment(getApplication(), uri, maxChars)
                 }
                 _state.update {
                     it.copy(
                         pendingAttachments = it.pendingAttachments + att,
                         snackbar = if (att.truncated)
-                            "„${att.name}“ ist lang und wurde auf ${FileUtils.MAX_ATTACHMENT_CHARS} Zeichen gekürzt." else null
+                            "„${att.name}“ ist für dieses Modell zu lang und wurde auf $maxChars Zeichen gekürzt." else null
                     )
                 }
             } catch (e: Exception) {
@@ -201,5 +325,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val KEY_MODEL_PATH = "model_path"
         private const val KEY_GPU = "use_gpu"
+        private const val KEY_HF_TOKEN = "hf_token"
+
+        private fun deviceRamGb(context: Context): Int {
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val info = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(info)
+            return (info.totalMem / 1_000_000_000.0).roundToInt()
+        }
     }
 }

@@ -1,5 +1,6 @@
 package de.localai.chat.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -53,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +63,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,6 +95,29 @@ fun ChatScreen(vm: ChatViewModel) {
     }
 
     var menuOpen by remember { mutableStateOf(false) }
+    var showModels by rememberSaveable { mutableStateOf(false) }
+
+    // Bildschirm während eines Downloads anlassen
+    val view = LocalView.current
+    val downloading = state.downloads.isNotEmpty()
+    DisposableEffect(downloading) {
+        view.keepScreenOn = downloading
+        onDispose { view.keepScreenOn = false }
+    }
+
+    val needsModel = state.modelStatus == ModelStatus.NONE || state.modelStatus == ModelStatus.ERROR
+    if (showModels || needsModel) {
+        BackHandler(enabled = showModels && !needsModel) { showModels = false }
+        ModelsScreen(
+            state = state,
+            vm = vm,
+            snackbarHost = snackbarHost,
+            onBack = if (needsModel) null else ({ showModels = false }),
+            onImport = { pickModel.launch(arrayOf("*/*")) },
+            onUse = { file -> vm.useModel(file); showModels = false },
+        )
+        return
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHost) },
@@ -117,11 +143,11 @@ fun ChatScreen(vm: ChatViewModel) {
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
-                            text = { Text("Modell auswählen …") },
+                            text = { Text("Modelle verwalten …") },
                             leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
                             onClick = {
                                 menuOpen = false
-                                pickModel.launch(arrayOf("*/*"))
+                                showModels = true
                             },
                         )
                         DropdownMenuItem(
@@ -155,11 +181,7 @@ fun ChatScreen(vm: ChatViewModel) {
                     )
                 }
                 ModelStatus.IMPORTING, ModelStatus.LOADING -> LoadingView(state, Modifier.weight(1f))
-                ModelStatus.NONE, ModelStatus.ERROR -> SetupView(
-                    error = state.modelStatus == ModelStatus.ERROR,
-                    onPick = { pickModel.launch(arrayOf("*/*")) },
-                    modifier = Modifier.weight(1f),
-                )
+                ModelStatus.NONE, ModelStatus.ERROR -> Unit
             }
         }
     }
@@ -326,46 +348,6 @@ private fun LoadingView(state: UiState, modifier: Modifier) {
             CircularProgressIndicator()
             Spacer(Modifier.height(12.dp))
             Text("Modell wird geladen … das kann einige Sekunden dauern.")
-        }
-    }
-}
-
-@Composable
-private fun SetupView(error: Boolean, onPick: () -> Unit, modifier: Modifier) {
-    Column(
-        modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text("Willkommen!", style = MaterialTheme.typography.headlineSmall)
-        if (error) {
-            Text(
-                "Das Modell konnte nicht geladen werden. Prüfe, ob es eine MediaPipe-kompatible " +
-                    ".task-Datei ist, oder schalte im Menü die GPU-Option aus.",
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-        Card {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("So geht's", fontWeight = FontWeight.SemiBold)
-                Text("1. Lade ein KI-Modell im .task-Format herunter, z. B. „Gemma3-1B-IT“ (int4, ca. 550 MB) von huggingface.co/litert-community.")
-                Text("2. Tippe unten auf „Modell auswählen“ und wähle die Datei aus deinem Download-Ordner.")
-                Text("3. Fertig – danach läuft alles offline auf deinem Handy.")
-            }
-        }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface),
-            contentAlignment = Alignment.Center,
-        ) {
-            Button(onClick = onPick) {
-                Icon(Icons.Default.FolderOpen, null)
-                Spacer(Modifier.size(8.dp))
-                Text("Modell auswählen")
-            }
         }
     }
 }

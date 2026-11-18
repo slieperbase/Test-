@@ -22,7 +22,7 @@ class LlmEngine(private val context: Context) {
 
     val isLoaded: Boolean get() = llm != null
 
-    suspend fun load(modelPath: String, useGpu: Boolean, maxTokens: Int = MAX_TOKENS) =
+    suspend fun load(modelPath: String, useGpu: Boolean, maxTokens: Int) =
         withContext(Dispatchers.IO) {
             close()
             val options = LlmInference.LlmInferenceOptions.builder()
@@ -88,7 +88,4 @@ class LlmEngine(private val context: Context) {
         llm = null
     }
 
-    companion object {
-        const val MAX_TOKENS = 4096
-    }
 }
