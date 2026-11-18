@@ -35,7 +35,7 @@ jobs:
       - name: Katalog-URLs testen
         if: hashFiles('app/src/main/java/de/localai/chat/ModelCatalog.kt') != ''
         run: |
-          grep -o 'https://huggingface.co/[^"]*' app/src/main/java/de/localai/chat/ModelCatalog.kt | while read u; do
+          grep -o '\$HF/[^"]*' app/src/main/java/de/localai/chat/ModelCatalog.kt | sed 's#^\$HF#https://huggingface.co/litert-community#' | while read u; do
             code=$(curl -s -o /dev/null -w '%{http_code}' -L -r 0-0 "$u")
             echo "$code  $u"
           done
